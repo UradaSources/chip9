@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Launch (MSYS2 Clang64)",
+            "program": "${workspaceFolder}/build/chip9.exe",
+            "args": [],
+            "env": {
+                // 显式添加所有 MSYS2 关键路径
+                "PATH": "C:/msys64/clang64/bin;C:/msys64/usr/bin;${env:PATH}",
+                "MSYSTEM": "CLANG64",  // 明确使用 Clang64 环境
+                "CHERE_INVOKING": "1",  // 防止 MSYS2 修改工作目录
+                "MSYS2_PATH_TYPE": "inherit"  // 继承系统 PATH
+            },
+            "cwd": "${workspaceFolder}/build"
+        }
+    ]
+}

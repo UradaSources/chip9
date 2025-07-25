@@ -75,7 +75,6 @@ static bool keys[16]{};
 int font_mem_offset = 0;
 
 #include <cassert>
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
