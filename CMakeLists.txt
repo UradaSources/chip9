@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_executable(${PROJECT_NAME})
 
-set(SRC_FILES src/chip8.cpp)
+set(SRC_FILES src/main.cpp src/chip8.cpp src/common.cpp)
 
 target_sources(${PROJECT_NAME} PRIVATE ${SRC_FILES})
 target_include_directories(${PROJECT_NAME} PRIVATE inc)
