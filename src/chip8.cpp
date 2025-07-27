@@ -169,6 +169,7 @@ void print_bytes(const byte* dat, int len)
 }
 void print_vram()
 {
+	clear_screen();
 	for (int y = 0; y < SCREEN_HEIGHT; ++y)
 	{
 		// std::printf("%02X ", y);
@@ -179,12 +180,11 @@ void print_vram()
 		// 	std::cout << (p ? '#' : '.');
 		// }
 		// std::cout << '\n';
-
 		for (int x = 0; x < SCREEN_WIDTH; ++x)
 		{
 			int pos = y * SCREEN_WIDTH + x;
-			bool p = read_bit(vram, sizeof(vram), pos);
-			screen(x, y, p);
+			if (read_bit(vram, sizeof(vram), pos))
+				screen_pixel(x, y);
 		}
 	}
 }
