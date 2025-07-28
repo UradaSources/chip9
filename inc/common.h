@@ -4,18 +4,25 @@ using byte = uint8_t;
 using word = uint16_t;
 using uint = unsigned int;
 
+enum class key_state_t : byte
+{
+	NONE,
+	PRESSED,
+	RELEASE
+};
+
 // 由chip8实现
-void start();
+void start(const char* file_path);
 void update();
 
 const char* state_str();
 
 // 由后端实现
 void clear_screen();
-void screen_pixel(uint x, uint y); // 更新屏幕
+void screen_pixel(uint x, uint y, bool f); // 更新屏幕
 
-bool get_key(byte key);		// 检查特定键是否触发
-bool any_key(byte* key_id); // 检查是否有任何键触发并返回触发的键id
+key_state_t get_key(byte key);				   // 检查特定键是否按下
+bool any_key(key_state_t state, byte* key_id); // 检查是否有任何键按下并返回触发的键id
 
 // 通用
 bool load_file(const char* filename, byte* buffer, int* len);
@@ -25,4 +32,4 @@ void delay_ns(uint32_t ns);				  // 延迟
 uint64_t uptime_ns();
 uint64_t uptime_ms();
 
-constexpr const char FILE_PATH[] = "../data/Pong.ch8";
+inline bool debug_out() { return false; }

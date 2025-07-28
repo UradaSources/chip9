@@ -1,19 +1,17 @@
 #include "common.h"
 
 #include <SDL3/SDL.h>
-#include <SDL3/SDL_events.h>
-#include <SDL3/SDL_pixels.h>
-#include <SDL3/SDL_rect.h>
-#include <SDL3/SDL_render.h>
-#include <SDL3/SDL_surface.h>
-#include <SDL3/SDL_video.h>
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <winerror.h>
 #include <winscard.h>
+
+// 由一个粗糙实现的sdl后端提供支持
+// 通过修改common.h中的FILE_PATH来决定运行哪个卡带
 
 // 16进制键盘布局
 // 1	2	3	C
@@ -31,50 +29,67 @@ constexpr int KeyMap[KeyNum]{
 constexpr int SCREEN_WIDTH = 64;
 constexpr int SCREEN_HEIGHT = 32;
 
-// bool vram[SCREEN_WIDTH * SCREEN_HEIGHT]{};
-
-bool keys_state[KeyNum]{};
+key_state_t keys_state[KeyNum]{};
 
 SDL_Surface* bg;
 SDL_Surface* vram;
 
 SDL_Surface* screen;
 
-void clear_screen() { SDL_BlitSurface(bg, nullptr, vram, nullptr); }
-void screen_pixel(uint x, uint y)
+bool screen_changed = true;
+
+void clear_screen() { screen_changed = true; }; // { SDL_ClearSurface(vram, 0, 0, 0, 0); }
+void screen_pixel(uint x, uint y, bool f)
 {
 	constexpr uint8_t FG = 20;
-	SDL_WriteSurfacePixel(vram, x, y, FG, FG, FG, 255);
+
+	uint8_t c;
+	SDL_ReadSurfacePixel(vram, x, y, &c, nullptr, nullptr, nullptr);
+
+	if (c > 0 && !f)
+	{
+		c = std::min((int)c + 40, 255);
+	}
+	else
+	{
+		c = f ? FG : 255;
+	}
+
+	SDL_WriteSurfacePixel(vram, x, y, c, c, c, 255 - c);
 }
 
-bool get_key(byte key_id)
+key_state_t get_key(byte key_id)
 {
 	if (key_id >= KeyNum)
 	{
 		std::printf("error: required invaild key\n");
-		return false;
+		return key_state_t::NONE;
 	}
 	return keys_state[key_id];
 }
-bool any_key(byte* key_id)
+bool any_key(key_state_t state, byte* key_id)
 {
 	for (int i = 0; i < 16; i++)
 	{
-		if (keys_state[i])
+		if (keys_state[i] == state)
 		{
-			*key_id = i;
+			if (key_id)
+				*key_id = i;
+
 			return true;
 		}
 	}
-	*key_id = 0;
+
+	if (key_id)
+		*key_id = 0;
 	return false;
 }
 
 void init_surface(SDL_Window* window)
 {
 	screen = SDL_GetWindowSurface(window);
-	bg = SDL_CreateSurface(SCREEN_WIDTH, SCREEN_HEIGHT, SDL_PIXELFORMAT_RGB24);
-	vram = SDL_CreateSurface(SCREEN_WIDTH, SCREEN_HEIGHT, SDL_PIXELFORMAT_RGB24);
+	bg = SDL_CreateSurface(SCREEN_WIDTH, SCREEN_HEIGHT, SDL_PIXELFORMAT_RGBA32);
+	vram = SDL_CreateSurface(SCREEN_WIDTH, SCREEN_HEIGHT, SDL_PIXELFORMAT_RGBA32);
 
 	constexpr uint8_t BG0 = 135;
 	constexpr uint8_t BG1 = 150;
@@ -95,9 +110,23 @@ void init_surface(SDL_Window* window)
 
 void draw(float scale, uint32_t ox, uint32_t oy)
 {
-	// 清空vram
 	SDL_Rect dst{(int)ox, (int)oy, (int)(vram->w * scale), (int)(vram->h * scale)};
+	SDL_BlitSurfaceScaled(bg, nullptr, screen, &dst, SDL_SCALEMODE_NEAREST);
 	SDL_BlitSurfaceScaled(vram, nullptr, screen, &dst, SDL_SCALEMODE_NEAREST);
+}
+
+void update_display(int fps, float instr_duration, const char* state_str)
+{
+	static char msg_buf[100]{};
+
+	int end = std::snprintf(msg_buf, sizeof(msg_buf), "fps: %d up: %.4fms, state: %s", fps,
+		instr_duration / 1000000.0f, state_str);
+
+	// std::memset(msg_buf + end, ' ', sizeof(msg_buf) - 1);
+	// msg_buf[sizeof(msg_buf) - 1] = '\0';
+
+	std::printf("%s\n", msg_buf);
+	std::fflush(stdout);
 }
 
 int main()
@@ -108,24 +137,35 @@ int main()
 
 	init_surface(window);
 
-	start();
+	static char file_name_rev[32]{};
+	std::scanf("%30s", file_name_rev);
+	
+	start(file_name_rev);
 
+	// 以每秒700个指令的速度执行
 	constexpr uint64_t FrameIntervalNs = 1000000 / 700;
 
 	bool quit = false;
 
 	uint64_t frame_delay = 0;
-	uint64_t real_frame_delay = 0;
-	uint64_t upd_delay = 0;
-	uint64_t draw_delay = 0;
+	uint64_t instr_duration = 0;
 
 	SDL_Event event{};
 	while (!quit)
 	{
 		auto start_time = uptime_ns();
 
+		// 绘制调试信息
+		// int fps = (int)(1000000000.0f / frame_delay);
+		// update_display(fps, instr_duration, state_str());
+
 		// 清除按键状态
-		// std::memset(keys_state, 0, sizeof(keys_state));
+		for (int i = 0; i < KeyNum; i++)
+		{
+			auto& code = keys_state[i];
+			if (code == key_state_t::RELEASE)
+				code = key_state_t::NONE;
+		}
 
 		while (SDL_PollEvent(&event) != 0)
 		{
@@ -139,7 +179,7 @@ int main()
 				{
 					byte key_code = it - KeyMap;
 					// std::printf("key trigger: %X\n", key_code);
-					keys_state[key_code] = 0;
+					keys_state[key_code] = key_state_t::RELEASE;
 				}
 			}
 			else if (event.type == SDL_EVENT_KEY_DOWN)
@@ -149,48 +189,26 @@ int main()
 				if (it != end)
 				{
 					byte key_code = it - KeyMap;
-					std::printf("key trigger: %X\n", key_code);
-					keys_state[key_code] = 1;
+					// std::printf("key trigger: %X\n", key_code);
+					keys_state[key_code] = key_state_t::PRESSED;
 				}
 			}
 		}
 
-		uint64_t up_st = uptime_ns();
-		update();
-		upd_delay = uptime_ns() - up_st;
-
-		uint64_t draw_st = uptime_ns();
-
-		// SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-		// SDL_RenderClear(renderer);
-
-		// 绘制调试信息
 		{
-			static char msg_buf[100];
-
-			int fps = (int)(1000000000.0f / frame_delay);
-			std::snprintf(msg_buf, sizeof(msg_buf), "fps: %d up: %.4fms, dr: %.4fms", fps,
-				(upd_delay / 1000000.0f), (draw_delay / 1000000.0f));
-
-			std::puts(msg_buf);
-
-			// SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
-			// SDL_RenderDebugText(renderer, 0, 0, msg_buf);
-			// SDL_RenderDebugText(renderer, 0, 10, state_str());
+			uint64_t _st = uptime_ns();
+			update();
+			instr_duration = uptime_ns() - _st;
 		}
 
-		// SDL_RenderPresent(renderer);
+		if (screen_changed)
+		{
+			draw(10, 100, 100);
+			SDL_UpdateWindowSurface(window);
+			screen_changed = false;
+		}
 
-		draw(10, 100, 100);
-		SDL_UpdateWindowSurface(window);
-
-		draw_delay = uptime_ns() - draw_st;
-
-		real_frame_delay = uptime_ns() - start_time;
-		if (real_frame_delay < FrameIntervalNs)
-			SDL_DelayNS(FrameIntervalNs - real_frame_delay);
-		frame_delay = uptime_ns() - start_time;
+		SDL_Delay(2);
 	}
-
 	return 0;
 }

@@ -60,6 +60,7 @@ static byte reg[16]{};
 // 地址寄存器
 static word I = 0;
 
+// 指令与程序计数器
 static word IR = 0;
 static word PC = 0;
 
@@ -74,8 +75,9 @@ static byte SP = 0;
 static byte dt = 0;
 static byte st = 0;
 
+// 可配置项
 // 字体精灵的储存位置
-int font_mem_offset = 0;
+word cfg_font_mem_offset = 0;
 
 // 从字节数组中读取特定位
 bool read_bit(const byte* dat, int len, int bit_index)
@@ -104,7 +106,7 @@ bool xor_bit(byte* dat, int len, int bit_index, bool rhs)
 	return old && rhs;
 }
 
-// 将字节数组的每一位整体左移
+// 将字节数组中的每一位整体左移
 // 最终结果被写入到dst, src与dst可以指向同一个数组
 // 返回最后一个字节中溢出的部分
 byte array_left_shift(const byte* src, byte* dst, unsigned int len, unsigned int n)
@@ -183,18 +185,10 @@ void print_vram()
 		for (int x = 0; x < SCREEN_WIDTH; ++x)
 		{
 			int pos = y * SCREEN_WIDTH + x;
-			if (read_bit(vram, sizeof(vram), pos))
-				screen_pixel(x, y);
+			bool f = read_bit(vram, sizeof(vram), pos);
+			screen_pixel(x, y, f);
 		}
 	}
-}
-
-// 从内存中查找下一条指令
-void fetch()
-{
-	byte h = ram[PC++];
-	byte l = ram[PC++];
-	IR = (word)((h << 8) | l);
 }
 
 // execute的执行状态
@@ -207,6 +201,7 @@ enum state_t
 	// 等待按键输入
 	// 经典vip模式时, 将等待一个完整的按键按下-松开过程
 	STATE_WAIT_KEY,
+	STATE_WAIT_KEY_UP,
 	// 死循环
 	STATE_INFINITE_LOOP,
 	// 当前执行的指令未实现或是无效的
@@ -240,6 +235,17 @@ const char* state_tostr(state_t st)
 	}
 }
 
+// 从内存中查找下一条指令
+void fetch(state_t* state)
+{
+	if (*state != STATE_RUNNING)
+		return;
+
+	byte h = ram[PC++];
+	byte l = ram[PC++];
+	IR = (word)((h << 8) | l);
+}
+
 // 执行当前指令
 // state指示运行状态, 在执行完毕过程中state可能被更新
 // ctx缓存上一个状态时记录的寄存器编号, 可能是无效的
@@ -250,8 +256,8 @@ void execute(state_t* state, byte* cached_reg)
 	// Vx已被记录到cached_reg
 	if (*state == STATE_WAIT_KEY)
 	{
-		byte key_id = 0;
-		if (any_key(&key_id))
+		byte key_id;
+		if (any_key(key_state_t::RELEASE, &key_id))
 		{
 			reg[*cached_reg] = key_id;
 			*state = STATE_RUNNING;
@@ -379,16 +385,19 @@ void execute(state_t* state, byte* cached_reg)
 				// 8XY1: Vx |= Vy
 				case 1: {
 					x |= y;
+					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
 				// 8XY2 Vx &= Vy
 				case 2: {
 					x &= y;
+					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
 				// 8XY3 Vx ^= Vy
 				case 3: {
 					x ^= y;
+					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
 				// 8XY4 Vx += Vy
@@ -481,13 +490,13 @@ void execute(state_t* state, byte* cached_reg)
 			// EX9E: if (keys(Vx)) PC+=2
 			if (opcode == 0xE09E)
 			{
-				if (get_key(reg[r] & 0xF))
+				if (get_key(reg[r] & 0xF) == key_state_t::PRESSED)
 					PC += 2;
 			}
 			// EXA1: if (!keys(Vx)) PC+=2
 			else if (opcode == 0xE0A1)
 			{
-				if (!get_key(reg[r] & 0xF))
+				if (get_key(reg[r] & 0xF) != key_state_t::PRESSED)
 					PC += 2;
 			}
 			else
@@ -509,18 +518,8 @@ void execute(state_t* state, byte* cached_reg)
 			// FX0A: 阻塞的等待按键按下并储存到Vx
 			else if (opcode == 0xF00A)
 			{
-				std::printf("start wiat\n");
-
-				byte key_id = 0;
-				if (any_key(&key_id))
-				{
-					reg[*cached_reg] = key_id;
-				}
-				else
-				{
-					*state = STATE_WAIT_KEY;
-					*cached_reg = r;
-				}
+				*state = STATE_WAIT_KEY;
+				*cached_reg = r;
 			}
 			// FX15: delay_timer=Vx
 			else if (opcode == 0xF015)
@@ -541,7 +540,7 @@ void execute(state_t* state, byte* cached_reg)
 			else if (opcode == 0xF029)
 			{
 				// 每个字符精灵占用2字节
-				I = font_mem_offset + (reg[r] & 0xF) * 4;
+				I = cfg_font_mem_offset + (reg[r] & 0xF) * 4;
 			}
 			// FX33: 拆解Vx的百,十,个位, 分别储存到I,I+1,I+2
 			else if (opcode == 0xF033)
@@ -557,12 +556,18 @@ void execute(state_t* state, byte* cached_reg)
 			{
 				for (int i = 0; i <= r; i++)
 					ram[I + i] = reg[i];
+
+				// 没有记录的原始实现定义行为
+				I += r;
 			}
 			// FX65: 从I-I+x读取值并储存到V0-Vx
 			else if (opcode == 0xF065)
 			{
 				for (int i = 0; i <= r; i++)
 					reg[i] = ram[I + i];
+
+				// 没有记录的原始实现定义行为
+				I += r;
 			}
 			else
 			{
@@ -599,8 +604,8 @@ void reset(const byte* rom, int rom_len, const byte* font, int _font_mem_offset,
 
 	assertm(_font_mem_offset >= 0 && _font_mem_offset < sizeof(ram) && font_len > 0, "font data invaild");
 
-	font_mem_offset = _font_mem_offset;
-	std::memcpy(ram + font_mem_offset, font, font_len);
+	cfg_font_mem_offset = _font_mem_offset;
+	std::memcpy(ram + cfg_font_mem_offset, font, font_len);
 }
 
 // 更新计时器
@@ -609,14 +614,16 @@ void update_timer()
 	static uint64_t st_timer = 0;
 	static uint64_t dt_timer = 0;
 
+	constexpr int Interval = 1000 / 60;
+
 	if (st)
 	{
 		if (!st_timer)
 			st_timer = uptime_ms();
-		else if (uptime_ms() - st_timer >= 1000)
+		else if (uptime_ms() - st_timer >= Interval)
 		{
 			st -= 1;
-			st_timer += 1000;
+			st_timer += Interval;
 		}
 	}
 	else
@@ -626,10 +633,10 @@ void update_timer()
 	{
 		if (!dt_timer)
 			dt_timer = uptime_ms();
-		else if (uptime_ms() - dt_timer >= 1000)
+		else if (uptime_ms() - dt_timer >= Interval)
 		{
 			dt -= 1;
-			dt_timer += 1000;
+			dt_timer += Interval;
 		}
 	}
 	else
@@ -653,9 +660,8 @@ const char* state_str()
 	return _buf;
 }
 
-void start()
+void start(const char* file_path)
 {
-	const char* file_path = FILE_PATH;
 	// char file_path[100]{};
 	// std::scanf("inp test rom: %99s\n", file_path);
 
@@ -664,14 +670,14 @@ void start()
 
 	if (!load_file(file_path, buffer, &len))
 	{
-		std::printf("rom load faild\n");
+		std::printf("rom %s load faild\n", file_path);
 		exit(-1);
 	}
 
 	// 初始化cpu并清空ram/寄存器组
 	reset(buffer, len, nullptr, 0, 0);
 
-	std::printf("rom load done. len: %d\n", len);
+	std::printf("rom %s load done. len: %d\n", file_path, len);
 }
 
 void update()
@@ -681,19 +687,22 @@ void update()
 
 	word old_pc = PC;
 
-	fetch();
+	fetch(&state);
 	execute(&state, &cached_reg);
 
 	update_timer();
 
 	// 打印指令运行信息
-	// std::printf("PC=0x%04X,IR=0x%04X,NPC=0x%04X,I=0x%04X reg={", old_pc, IR, PC, I);
-	// for (int i = 0; i < 16; i++)
-	// {
-	// 	if (reg[i])
-	// 		std::printf("%X:0x%04X,", i, reg[i]);
-	// }
-	// std::printf("}\n");
+	if (debug_out())
+	{
+		std::printf("PC=0x%04X,IR=0x%04X,NPC=0x%04X,I=0x%04X reg={", old_pc, IR, PC, I);
+		for (int i = 0; i < 16; i++)
+		{
+			// if (reg[i])
+			std::printf("%X:0x%02X,", i, reg[i]);
+		}
+		std::printf("} state=%s,st=%d,dt=%d\n", state_tostr(state), st, dt);
+	}
 
 	// 处理运行状态
 	// 稍后重置状态或是退出
