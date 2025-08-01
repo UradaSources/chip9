@@ -2,6 +2,7 @@
 // https://tobiasvl.github.io/blog/write-a-chip-8-emulator/
 #include "common.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cstdint>
 #include <cstdio>
@@ -133,33 +134,75 @@ byte array_left_shift(const byte* src, byte* dst, unsigned int len, unsigned int
 // 将对x,y进行取模, 绘制冲突时设置VF为1
 void draw(int x, int y, const byte* sp, int h)
 {
+	// 精灵也是由bit组成的bit set, 且固定宽度为8, 高度为不定长的h
+	// 故这一段精灵数据的字节长度为h
+
+	// 精灵bit数据总是字节对齐的, 但是由于x,y会变化, 写入的vram bit位置是字节不对齐的
+
+	// 处理过程:
+	// 每次只向vram写入一行精灵, 即一个字节
+	// 在写入之前, 令精灵数据对齐到ram, 缓存精灵数据溢出的部分
+	// 写入vram时, 除了精灵本字节与vram对齐的部分, 还需要添加上一次精灵溢出的部分
+
 	// 对坐标进行取模
 	x %= SCREEN_WIDTH;
 	y %= SCREEN_HEIGHT;
 
+	// 重置碰撞标志
 	reg[0xF] = 0;
 
+	// 计算写入起始位的字节对齐偏移
+	// 0时代表位与字节对齐
+	int bit_offset = x % 8;
+
+	// 在位位置不对齐时, 用于获取溢出部分的掩码
+	byte mask = 0xF >> (8 - bit_offset);
+
+	// 计算vram的写入开始字节位置
+	int start_byte_pos = y * SCREEN_WIDTH + x / 8;
+
+	// 计算可以绘制的行数
+	h = std::min(SCREEN_HEIGHT - y, h);
+
+	int y_max = std::min(y + h, SCREEN_HEIGHT - 1);
 	for (int row = 0; row < h; row++)
 	{
-		int cy = y + row;
-		if (cy >= SCREEN_HEIGHT)
-			break;
+		// 当前行需要修改的显存的字节索引
+		int pos = start_byte_pos + row * SCREEN_WIDTH;
 
-		for (int col = 0; col < 8; col++)
+		vram[pos] ^= sp[row] >> bit_offset;
+
+		// 在写入位与字节不对齐, 且不处于屏幕右边缘时需要将精灵数据中由于溢出的部分写入第2个字节
+		if (bit_offset && x != SCREEN_WIDTH - 1)
 		{
-			int cx = x + col;
-			if (cx >= SCREEN_WIDTH)
-				break;
-
-			bool old = read_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx);
-
-			// 在当前行里读取
-			bool src = read_bit(sp + row, 1, col);
-			reg[0xF] |= xor_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx, src);
-
-			bool vnew = read_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx);
+			vram[pos] ^= sp[row] >> bit_offset;
+			vram[pos + 1] ^= sp[row] & mask;
 		}
 	}
+
+	// 将最后溢出的部分也写入vram
+
+	// for (int row = 0; row < h; row++)
+	// {
+	// 	int cy = y + row;
+	// 	if (cy >= SCREEN_HEIGHT)
+	// 		break;
+
+	// 	for (int col = 0; col < 8; col++)
+	// 	{
+	// 		int cx = x + col;
+	// 		if (cx >= SCREEN_WIDTH)
+	// 			break;
+
+	// 		bool old = read_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx);
+
+	// 		// 在当前行里读取
+	// 		bool src = read_bit(sp + row, 1, col);
+	// 		reg[0xF] |= xor_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx, src);
+
+	// 		bool vnew = read_bit(vram, sizeof(vram), cy * SCREEN_WIDTH + cx);
+	// 	}
+	// }
 }
 
 // 调试打印
@@ -377,55 +420,55 @@ void execute(state_t* state, byte* cached_reg)
 
 			switch (opcode)
 			{
-				// 8XY0: Vx = Vy
+				// 8XY0: Vx=Vy
 				case 0: {
 					x = y;
 					return;
 				}
-				// 8XY1: Vx |= Vy
+				// 8XY1: Vx|=Vy
 				case 1: {
 					x |= y;
 					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
-				// 8XY2 Vx &= Vy
+				// 8XY2 Vx&=Vy
 				case 2: {
 					x &= y;
 					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
-				// 8XY3 Vx ^= Vy
+				// 8XY3 Vx^=Vy
 				case 3: {
 					x ^= y;
 					reg[0xF] = 0; // 没有记录的原始实现定义行为
 					return;
 				}
-				// 8XY4 Vx += Vy
+				// 8XY4 Vx+=Vy
 				case 4: {
 					int v = x + y;
 					x = (byte)v;
 					reg[0xF] = v > 0xFF;
 					return;
 				}
-				// 8XY5 Vx -= Vy
+				// 8XY5 Vx-=Vy
 				case 5: {
 					x -= y;
 					reg[0xF] = orig_x >= orig_y;
 					return;
 				}
-				// 8XY6 Vx >>= 1
+				// 8XY6 Vx>>=1
 				case 6: {
 					x >>= 1;
 					reg[0xF] = orig_x & 1;
 					return;
 				}
-				// 8XY7 Vx = Vy - Vx
+				// 8XY7 Vx=Vy-Vx
 				case 7: {
 					x = y - x;
 					reg[0xF] = orig_y >= orig_x;
 					return;
 				}
-				// 8XYE Vx <<= 1
+				// 8XYE Vx<<=1
 				case 0xE: {
 					x <<= 1;
 					reg[0xF] = (orig_x & 0x80) > 0;
@@ -510,7 +553,7 @@ void execute(state_t* state, byte* cached_reg)
 			word opcode = IR & 0xF0FF;
 			byte r = (IR & 0x0F00) >> 8;
 
-			// FX07: Vx = delay_timer
+			// FX07: Vx=delay_timer
 			if (opcode == 0xF007)
 			{
 				reg[r] = dt;
@@ -648,7 +691,6 @@ state_t state = STATE_RUNNING;
 byte cached_reg = 0;
 
 bool quit = false;
-uint32_t time = 0;
 
 const char* state_str()
 {
